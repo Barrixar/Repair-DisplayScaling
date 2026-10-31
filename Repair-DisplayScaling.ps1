@@ -9,12 +9,12 @@
     values under HKCU\Control Panel\Desktop. When that state no longer matches
     the connected display, Windows can apply a scale that belongs to other
     display data, so everything on screen looks too large or too small even at
-    the correct resolution. This state also survives a clean driver reinstall,
-    including one performed with Display Driver Uninstaller (DDU), and the
-    Custom Scaling page under Settings > System > Display can still report the
-    expected scale as "Unmodified default" while the applied scale is wrong,
-    which makes the cause hard to identify from the usual troubleshooting
-    steps.
+    the correct resolution. Some or all of this state also survives a clean
+    driver reinstall (and Display Driver Uninstaller prior to v18.1.6.2, or
+    even v18.1.6.2+ for legacy Desktop DPI and live NvHybrid values), while
+    Custom Scaling under Settings > System > Display can still report the
+    expected scale as "Unmodified default", which makes the cause hard to
+    identify from the usual troubleshooting steps.
 
     Moving the installation to another SSD or disk, or restoring an image onto
     different hardware, is a common way to end up with that mismatch, because
