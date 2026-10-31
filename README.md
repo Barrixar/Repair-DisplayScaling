@@ -21,6 +21,7 @@
 * [Layer-by-Layer Architecture](#layer-by-layer-architecture)
 * [Backup Folder & JSON Report Structure](#backup-folder--json-report-structure)
 * [Post-Repair Steps & Troubleshooting](#post-repair-steps--troubleshooting)
+* [Evolution with Display Driver Uninstaller (DDU) & Why Use This Tool](#evolution-with-display-driver-uninstaller-ddu--why-use-this-tool)
 * [Requirements & License](#requirements--license)
 
 ---
@@ -39,7 +40,7 @@ Windows does not store per-monitor display scaling as a simple percentage in one
 When any of these layers become stale or mismatched with the connected display:
 * **Everything on screen looks abnormally large or small** even while running at the correct native pixel resolution.
 * **Settings > System > Display > Custom Scaling still reports `"Unmodified default"`**, because no custom global override is active—Windows is dutifully applying a relative step offset (or `0` offset) on top of a stale panel EDID baseline or hybrid GPU persistence value.
-* **Clean GPU driver reinstalls—even with Display Driver Uninstaller (DDU)—do not fix it**, because DDU strips GPU driver files and service keys while leaving Windows' `InternalMonEdid`, CCD topology caches, and `HKCU` per-monitor DPI stores intact.
+* **Clean GPU driver reinstalls—and Display Driver Uninstaller (DDU) prior to v18.1.6.2—do not fix it**, because replacing graphics drivers (and DDU's legacy monitor cleanup) left Windows' cached `InternalMonEdid` panel baseline, `HKCU` per-monitor `PerMonitorSettings` step offsets, and legacy desktop DPI overrides intact *(following a report from this project, [DDU v18.1.6.2+ adopted parts of this cleanup](#evolution-with-display-driver-uninstaller-ddu--why-use-this-tool))*.
 
 `Repair-DisplayScaling.ps1` queries the live, unvirtualized hardware state via inline C# Win32 APIs, compares it against every persistent Registry store, plans the exact repairs required, and applies them only when asked—with automatic `.reg` backups and one-command rollback.
 
@@ -452,6 +453,82 @@ In **`Apply` mode** (`<BackupPath>\report.json`):
      ```
    * Check laptop vendor control software (e.g., ASUS Armoury Crate / G-Helper, Lenovo Vantage / Legion Toolkit, HP OMEN Gaming Hub, Dell Command) or GPU control panels (NVIDIA Control Panel / NVIDIA App / AMD Software) for MUX switch or custom display scaling overrides.
    * If you ran the repair with multiple displays connected and saw an ambiguity warning (`the panel could not be told apart from other displays`), either disconnect external monitors temporarily or pass `-MonitorInstanceId` explicitly using the ID shown under `== Monitor devices`.
+
+---
+
+## Evolution with Display Driver Uninstaller (DDU) & Why Use This Tool
+
+### How This Project Improved DDU (The Backstory & Upstream Outcome)
+
+`Repair-DisplayScaling` was originally written after my own SSD/OS transplant into a new laptop caused persistent Windows DPI scaling corruption that **survived a full Display Driver Uninstaller (DDU) run—even with every cleanup option and *"Remove present and non-present monitors"* enabled**.
+
+Investigating DDU's monitor cleanup alongside Windows' display stack revealed the exact gap:
+* Prior to v18.1.6.2, DDU's monitor removal (`RemoveMonitorConfiguration`) already cleared subkeys under `GraphicsDrivers\Configuration`, `Connectivity`, `ScaleFactors`, and `MonitorDataStore` and uninstalled PnP monitor nodes—**but left two decisive scaling layers untouched**:
+  1. `HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\InternalMonEdid` — Windows' cached physical dimensions for the built-in laptop panel, causing Windows to keep computing its `"Recommended"` baseline scale for the *old* screen.
+  2. `Control Panel\Desktop\PerMonitorSettings` (`HKCU` / `HKU`) — Per-user saved relative `DpiValue` step offsets applied on top of that baseline.
+* It also did not address `HKCU:\Control Panel\Desktop` legacy DPI overrides (`LogPixels`, `Win8DpiScaling`, `DesktopDPIOverride`) or in-place NVIDIA Hybrid Graphics persistence (`nvlddmkm\...\NvHybrid\Persistence` `DpiScalePercent`) when the NVIDIA driver itself was not being wiped (e.g., when cleaning only an Intel/AMD iGPU on an Optimus laptop).
+
+**Report to Wagnard & Upstream Integration:**
+* On **October 18, 2026**, after releasing [`Barrixar/Repair-DisplayScaling`](https://github.com/Barrixar/Repair-DisplayScaling) into the public domain under [The Unlicense](./LICENSE), the author (**Barrixar**) shared the repository and root-cause analysis directly with **Wagnard** (creator of DDU)—highlighting recurring community reports where DDU could not resolve stuck Windows scaling and granting permission to integrate the missing mechanics into DDU.
+* Wagnard confirmed the gap the same day, added `InternalMonEdid` deletion and per-user `PerMonitorSettings` cleanup to DDU's monitor removal routine (commit `4af94a9a`), and released it publicly on **October 21, 2026** in **[DDU v18.1.6.2](https://www.wagnardsoft.com/content/Download-Display-Driver-Uninstaller-DDU-18162)**:
+  > *"Monitors: Removing the monitors now also resets each screen's saved display scale and, on laptops, the built-in screen's cached details. This fixes text and icons that stay too large or too small even after a clean driver reinstall."*
+* In a subsequent refinement for **DDU v18.1.6.3+** (commit `b92f7a83`), DDU gated the `PerMonitorSettings` wipe behind a separate opt-in checkbox under monitor removal (*"Also reset the saved display scaling (text and icon size)"* / `-ResetDisplayScale`, **off by default**) so routine driver cleanups do not unexpectedly wipe custom multi-monitor scaling, while keeping `InternalMonEdid` cleanup active whenever monitor removal is ticked.
+
+### Evolution & Workflow Comparison Graph
+
+```mermaid
+flowchart TD
+    Origin["Barrixar/Repair-DisplayScaling (Oct 2026) — 5-Layer Windows DPI Research & Public-Domain Tool"]
+
+    Origin -- "Reported to Wagnard & partially ported (v18.1.6.2+)" --> DDU1
+    Origin -- "Full standalone diagnostic & surgical repair engine" --> RDS1
+
+    subgraph DDU["DDU v18.1.6.2+ (Full GPU Driver Wipe Path)"]
+        DDU1["1. Requires full GPU driver uninstall (Safe Mode recommended)"]
+        DDU2["2. Uninstalls ALL present & non-present PnP monitors"]
+        DDU3["3. Wipes InternalMonEdid, ScaleFactors & CCD topology"]
+        DDU4["4. Wipes ALL PerMonitorSettings (opt-in off by default in v18.1.6.3+)"]
+        DDU5["5. Requires reinstalling GPU drivers; misses read-only audits, external scale preservation, legacy HKCU DPI & in-place NvHybrid edits"]
+        DDU1 --> DDU2 --> DDU3 --> DDU4 --> DDU5
+    end
+
+    subgraph RDS["Repair-DisplayScaling.ps1 (Targeted Live Repair Path)"]
+        RDS1["1. Read-Only Audit (Default): Live Win32 DPI, CCD Paths, EDID/PPI & -DeepScan"]
+        RDS2["2. Zero Driver Disruption: Runs in normal Windows; GPU drivers stay untouched"]
+        RDS3["3. Smart Panel Isolation: Resolve-Panel, -PreserveExternalMonitorSettings & -MonitorInstanceId"]
+        RDS4["4. Complete 5-Layer Control: InternalMonEdid, Scale Stores, In-Place NvHybrid, EDID_OVERRIDE & Legacy HKCU DPI"]
+        RDS5["5. Auditable Safety: Mandatory .reg backups, UTF-8 report.json & 1-command -Restore"]
+        RDS1 --> RDS2 --> RDS3 --> RDS4 --> RDS5
+    end
+```
+
+### `Repair-DisplayScaling.ps1` vs. DDU (Feature & Capability Matrix)
+
+Even after DDU v18.1.6.2+ adopted `InternalMonEdid` and `PerMonitorSettings` cleanup, DDU executes monitor cleanup **only inside a full GPU driver uninstallation** and operates as an all-or-nothing wipe. `Repair-DisplayScaling.ps1` provides dedicated diagnostics, selective multi-monitor preservation, additional DPI layers, and granular rollback:
+
+| Capability / Persistence Layer | DDU (Pre-v18.1.6.2) | DDU (v18.1.6.2+) | `Repair-DisplayScaling.ps1` |
+| :--- | :--- | :--- | :--- |
+| **Primary Goal** | Full GPU driver & Driver Store uninstaller | Full GPU driver & Driver Store uninstaller | **Targeted DPI/EDID diagnostics & surgical scaling repair** |
+| **GPU Driver Reinstall Required?** | **Yes** (Safe Mode recommended) | **Yes** — Monitor cleanup only runs during a GPU driver wipe | **No** — Runs live in normal Windows; GPU drivers & 3D settings stay intact |
+| **Read-Only Diagnostic / Dry-Run Mode** | No | No | **Yes (Default)** — Live Win32 DPI/CCD probes, EDID/PPI decoding, `stale` flags & numbered plan |
+| **Internal Laptop Panel EDID Cache** (`GraphicsDrivers\InternalMonEdid`) | Not cleared *(left stale baseline)* | **Cleared** when *Remove Monitors* is ticked *(ported from this project)* | **Decoded, staleness-checked & cleared** (verifies cached vs. live hardware EDID) |
+| **Per-User Scale Offsets** (`Control Panel\Desktop\PerMonitorSettings`) | Not cleared *(left `DpiValue` steps)* | **Wipes all monitors** across loaded `HKU` hives *(opt-in off by default in v18.1.6.3+)* | **All or selective** — Clears `HKCU` store, or **only** the active panel via `-PreserveExternalMonitorSettings` |
+| **Machine Scale & CCD Topology** (`ScaleFactors`, `Configuration`, `Connectivity`) | Subkeys cleared with *Remove Monitors* (plus `MonitorDataStore`) | Subkeys cleared with *Remove Monitors* (plus `MonitorDataStore`) | **Cleared** (with `-PreserveExternalMonitorSettings` preserving external `ScaleFactors` entries) |
+| **Selective Multi-Monitor & Panel Targeting** | None — Removes **all** PnP monitors | None — Removes **all** PnP monitors & scales | **Yes** — `Resolve-Panel` auto-detection, ambiguity guard, `-PreserveExternalMonitorSettings` & `-MonitorInstanceId` |
+| **NVIDIA Hybrid / Optimus Persistence** (`nvlddmkm\...\NvHybrid\Persistence` `DpiScalePercent`) | Collateral only *(cleared only during a full NVIDIA driver wipe)* | Collateral only *(missed if cleaning only an Intel/AMD iGPU)* | **In-place control** — Audits, deletes, skips (`-SkipNvidiaPersistenceReset`), or sets `100`–`500%` (`-NvidiaScalePercent`) without removing `nvlddmkm` |
+| **Legacy Desktop & Font DPI Overrides** (`HKCU:\Control Panel\Desktop` `LogPixels`, `Win8DpiScaling`, `DesktopDPIOverride`) | Not inspected or touched | Not inspected or touched | **Audited & optionally reset** via `-ResetLegacyDpiValues` (also inspects `HKLM` `FontDPI`) |
+| **Custom `EDID_OVERRIDE` Registry Blobs** (`Enum\DISPLAY\...\Device Parameters`) | Not inspected *(removed only via wholesale SetupAPI monitor wipe)* | Not inspected *(removed only via wholesale SetupAPI monitor wipe)* | **Explicitly audited, validated & surgically removed** on the target panel (supports corrupt-EDID recovery) |
+| **Deep Registry Forensics (`-DeepScan`)** | No | No | **Yes** — Walks 9 Windows/NVIDIA/AMD registry trees for hidden EDIDs and `dpi`/`scale` values |
+| **Backups, Audit Trail & Rollback** | Optional whole-OS System Restore Point; text log | Optional whole-OS System Restore Point; text log | **Mandatory all-or-nothing `.reg` exports** (aborts on any failure), `before`/`after` `report.json` & `-Restore` |
+| **Form Factor & Automation** | Compiled `.NET 4.8` GUI suite | Compiled `.NET 4.8` GUI suite | **Zero-dependency single `.ps1` script** — Auditable source & CLI switches for unattended/IT post-imaging use |
+
+### When to Choose `Repair-DisplayScaling.ps1` Over DDU
+
+* **Your GPU drivers are healthy—only your scaling is broken:** Fix oversized or tiny UI scaling in seconds from a regular elevated PowerShell prompt without booting into Safe Mode, stripping graphics drivers, rebuilding shader caches, or losing NVIDIA/AMD control panel profiles.
+* **You want to diagnose *why* Windows chose the wrong scale before changing anything:** Run `.\Repair-DisplayScaling.ps1` (without `-Apply`) as a standard user to inspect unvirtualized `GetDpiForMonitor` vs. `GetDpiForSystem` values, physical EDID dimensions/PPI, `stale: yes` internal panel caches, `EDID_OVERRIDE` blobs, and `NvHybrid` / legacy DPI state.
+* **You use external monitors whose custom scaling you want to keep:** Pass `-PreserveExternalMonitorSettings` (or `-MonitorInstanceId`) so only the broken laptop panel or target display is reset and re-enumerated via `pnputil.exe`.
+* **You have an NVIDIA Optimus / Advanced Optimus laptop or legacy DPI overrides:** Directly clear or set `DpiScalePercent` (`-NvidiaScalePercent`) without wiping `nvlddmkm`, and clear stuck `LogPixels` / `DesktopDPIOverride` values (`-ResetLegacyDpiValues`) that DDU never touches.
+* **You need deterministic, lightweight rollback or automation:** Every touched key is exported to `.reg` files alongside a structured `report.json` before any edit occurs, reversible via `-Restore`—ideal for sysadmins, repair shops, and OS transplant/deployment scripts. *(Conversely, use **DDU v18.1.6.2+**—with monitor removal and display scale reset enabled—when you already need a full Safe Mode GPU driver wipe.)*
 
 ---
 
